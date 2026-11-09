@@ -1,14 +1,16 @@
-import os, json
+import os, json, statistics as st
 import torch
 import torch.nn.functional as F
 from sklearn.metrics import roc_auc_score
 from common import get_datasets, CNN
 from attribution.tracin import per_sample_grads
 
-NOISE = 0.10
+# ---------- settings ----------
+NOISE = 0.30                      # fraction of training labels corrupted
 EPOCHS = 12
-CKPT_EPOCHS = (3, 6, 9, 11)
-SEEDS = [0, 1]
+CKPT_EPOCHS = (3, 6, 9, 11)       # checkpoints used for self-influence
+SEEDS = [0, 1, 2]                 # repeats for the repair test
+N_TEST = 10000                    # full CIFAR-10 test set
 SAVE_DIR = "ckpts/noisy"          # inside ckpts/, so git ignores it
 
 
@@ -41,12 +43,26 @@ def train(keep_idx, labels, seed, train_x, save_dir=None):
     return model
 
 
-def accuracy(model, tx, ty):
+def accuracy(model, x, y, bs=500):
+    model.eval()
+    correct = 0
     with torch.no_grad():
-        return (model(tx).argmax(1) == ty).float().mean().item()
+        for s in range(0, len(x), bs):
+            correct += (model(x[s:s + bs]).argmax(1) == y[s:s + bs]).sum().item()
+    return correct / len(x)
+
+
+def per_example_loss(model, x, y, bs=500):
+    model.eval()
+    out = []
+    with torch.no_grad():
+        for s in range(0, len(x), bs):
+            out.append(F.cross_entropy(model(x[s:s + bs]), y[s:s + bs], reduction="none"))
+    return torch.cat(out)
 
 
 def self_influence(x, y):
+    """TracIn self-influence: sum over checkpoints of lr * ||grad||^2."""
     lrs = json.load(open(f"{SAVE_DIR}/lrs.json"))
     total = torch.zeros(len(x))
     for ep in CKPT_EPOCHS:
@@ -62,14 +78,16 @@ def self_influence(x, y):
 
 if __name__ == "__main__":
     os.makedirs(SAVE_DIR, exist_ok=True)
+    os.makedirs("results", exist_ok=True)
+
     train_set, test_set = get_datasets()
     N = len(train_set)
     train_x = torch.stack([train_set[i][0] for i in range(N)])
     true_y = torch.tensor([train_set[i][1] for i in range(N)])
-    test_x = torch.stack([test_set[i][0] for i in range(2000)])
-    test_y = torch.tensor([test_set[i][1] for i in range(2000)])
+    test_x = torch.stack([test_set[i][0] for i in range(N_TEST)])
+    test_y = torch.tensor([test_set[i][1] for i in range(N_TEST)])
 
-    # 1) corrupt 10% of labels (always to a different class)
+    # 1) corrupt a fraction of labels (always to a different class)
     g = torch.Generator().manual_seed(123)
     n_bad = int(NOISE * N)
     flip = torch.randperm(N, generator=g)[:n_bad]
@@ -78,7 +96,7 @@ if __name__ == "__main__":
     noisy_y[flip] = (true_y[flip] + shift) % 10
     is_noisy = torch.zeros(N, dtype=torch.bool)
     is_noisy[flip] = True
-    print(f"corrupted {n_bad} of {N} labels")
+    print(f"corrupted {n_bad} of {N} labels ({NOISE:.0%})")
 
     # 2) train on the noisy labels, saving checkpoints
     all_idx = torch.arange(N)
@@ -87,28 +105,31 @@ if __name__ == "__main__":
 
     # 3) detection scores (higher = more suspicious)
     si = self_influence(train_x, noisy_y)
-    with torch.no_grad():
-        loss = F.cross_entropy(model(train_x), noisy_y, reduction="none")
+    loss = per_example_loss(model, train_x, noisy_y)
     rnd = torch.rand(N, generator=torch.Generator().manual_seed(7))
     scores = {"self-influence": si, "train loss": loss, "random": rnd}
 
     print(f"\nDetection of the {n_bad} corrupted labels:")
-    print(f"{'method':16s} {'AUROC':>7s} {'precision@' + str(n_bad):>15s}")
-    flagged = {}
+    print(f"{'method':16s} {'AUROC':>7s} {'precision@' + str(n_bad):>16s}")
+    flagged, detection = {}, {}
     for name, s in scores.items():
         top = s.topk(n_bad).indices
         flagged[name] = top
         auroc = roc_auc_score(is_noisy.numpy(), s.numpy())
         prec = is_noisy[top].float().mean().item()
-        print(f"{name:16s} {auroc:7.3f} {prec:15.3f}")
+        detection[name] = {"auroc": auroc, "precision": prec}
+        print(f"{name:16s} {auroc:7.3f} {prec:16.3f}")
 
     # 4) repair test: remove flagged examples, retrain, compare test accuracy
     flagged["oracle"] = flip
-    print("\nTest accuracy after removing flagged examples and retraining:")
-    results = {"no cleaning": []}
+    print("\nRepair test (retraining takes a while)...", flush=True)
+    results = {"clean labels (ceiling)": [], "no cleaning": []}
     for name in flagged:
         results[name] = []
+
     for seed in SEEDS:
+        results["clean labels (ceiling)"].append(
+            accuracy(train(all_idx, true_y, seed, train_x), test_x, test_y))
         results["no cleaning"].append(
             accuracy(train(all_idx, noisy_y, seed, train_x), test_x, test_y))
         for name, idxs in flagged.items():
@@ -117,5 +138,11 @@ if __name__ == "__main__":
             m = train(all_idx[keep], noisy_y, seed, train_x)
             results[name].append(accuracy(m, test_x, test_y))
         print(f"seed {seed} done", flush=True)
+
+    print("\nTest accuracy after removing flagged examples and retraining:")
     for name, accs in results.items():
-        print(f"  {name:16s} {sum(accs) / len(accs):.3f}")
+        print(f"  {name:24s} {st.mean(accs):.3f} (sd {st.pstdev(accs):.3f})")
+
+    json.dump({"noise": NOISE, "detection": detection, "repair": results},
+              open("results/label_noise_results.json", "w"), indent=2)
+    print("saved results/label_noise_results.json")
