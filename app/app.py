@@ -12,6 +12,7 @@ st.set_page_config(page_title="TraceML", layout="wide")
 st.title("TraceML: which training examples explain this prediction?")
 st.markdown("*Made by Binit Behl*")
 
+
 @st.cache_resource
 def setup():
     train_set, test_set = get_datasets()
@@ -66,11 +67,12 @@ with torch.no_grad():
 pred = probs.argmax().item()
 
 left, right = st.columns([1, 3])
+
 with left:
     st.image(to_img(x), width=180, caption=f"Test image #{int(idx)}")
     st.write(f"**True:** {CLASSES[y]}")
     st.write(f"**Predicted:** {CLASSES[pred]} ({probs[pred]:.0%})")
-        if pred == y:
+    if pred == y:
         st.success("Correct")
     else:
         st.error("Misclassified")
