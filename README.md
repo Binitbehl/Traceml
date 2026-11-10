@@ -1,12 +1,39 @@
 # TraceML: Training Data Attribution and Model Behavior Forensics
 
+Made by Binit Behl
+
 **Research question:** Which training examples are responsible for a model's
 particular predictions, mistakes, or undesirable behavior?
 
 TraceML implements training data attribution (TracIn and a nearest-neighbor
 baseline) on a small CIFAR-10 CNN. It tests the attribution scores against
-retraining ground truth and on two forensics tasks: finding corrupted labels
-and finding a backdoor.
+retraining ground truth and on two forensics tasks: finding corrupted labels and
+finding a backdoor. A Streamlit dashboard lets you explore the results.
+
+## Dashboard
+
+Pick any test image and see the training examples that most support or oppose the
+model's prediction. TracIn mode (below) shows the most helpful and most harmful
+training examples:
+
+![TracIn view](docs/dashboard_tracin.png)
+
+Nearest-neighbor mode shows the training images most similar to the test image
+from its true class:
+
+![Nearest-neighbor view](docs/dashboard_main.png)
+
+The backdoor page adds a trigger to a clean image, shows the model being hijacked,
+and traces the wrong answer back to the poisoned training images:
+
+![Backdoor demo](docs/dashboard_backdoor.png)
+
+```
+pip install -r requirements.txt
+streamlit run app/app.py
+```
+
+Run it from the project root, after training the model (see Reproduce).
 
 ## Setup
 
@@ -19,14 +46,21 @@ and finding a backdoor.
 common.py          shared model and data code
 models/train.py   trains the model and saves checkpoints
 attribution/      knn.py (baseline), tracin.py
-eval/             retrain.py, analyze.py                  ground-truth test
+eval/             retrain.py, analyze.py, retrain_extra.py,
+                  retrain_large.py                      ground-truth tests
                   label_noise.py, label_noise_val.py,
-                  label_noise_cos.py                      label-noise forensics
+                  label_noise_cos.py                    label-noise forensics
                   backdoor.py, backdoor_fix.py,
-                  backdoor_repair.py                      backdoor forensics
+                  backdoor_repair.py                    backdoor forensics
+app/              app.py and pages/1_Backdoor_demo.py   dashboard
+docs/             screenshots and charts used in this README
 ```
 
 ## Reproduce
+
+Run in this order, since later scripts reuse earlier outputs (checkpoints and
+saved results). Generated files go to `ckpts/`, `data/` and `results/`, which are
+git-ignored.
 
 ```
 pip install -r requirements.txt
@@ -35,22 +69,26 @@ python -m attribution.knn
 python -m attribution.tracin
 python -m eval.retrain
 python -m eval.analyze
+python -m eval.retrain_extra
+python -m eval.retrain_large
 python -m eval.label_noise
 python -m eval.label_noise_val
 python -m eval.label_noise_cos
 python -m eval.backdoor
 python -m eval.backdoor_fix
 python -m eval.backdoor_repair
+streamlit run app/app.py
 ```
 
-Run them in this order, since later scripts reuse earlier outputs (checkpoints
-and saved results). Generated files go to `ckpts/`, `data/` and `results/`,
-which are git-ignored.
+Several scripts retrain the model dozens of times; on a laptop CPU
+`retrain_large` takes about 3 hours.
 
 ## Methods
 
 - **kNN baseline:** rank training images by cosine similarity between the
-  penultimate-layer embeddings of the test and training images.
+  penultimate-layer embeddings of the test and training images. The
+  *label-aware* version only considers training images of the test image's true
+  class, which makes the comparison with TracIn fair.
 - **TracIn:** for a test example, sum over saved checkpoints
   `learning_rate * <gradient of the test loss, gradient of the training loss>`
   for every training example. Positive scores mean helpful, negative mean
@@ -59,8 +97,8 @@ which are git-ignored.
   first, so only their direction matters.
 - **Self-influence:** a training example's own TracIn score (squared gradient
   norm summed over checkpoints), used to find unusual examples.
-- **Validation-influence:** score each training example against the gradients
-  of a small set of trusted, clean validation images.
+- **Validation-influence:** score each training example against the gradients of
+  a small set of trusted, clean validation images.
 
 ## Results
 
@@ -72,44 +110,49 @@ Fraction of the top-10 training examples that share the test image's true class
 | Method | Same-class fraction |
 |---|---|
 | Random | 0.09 |
-| kNN (embedding similarity) | 0.50 |
+| kNN (embedding similarity, ignores the label) | 0.50 |
 | TracIn, most helpful | 0.99 |
 | TracIn, most harmful | 0.00 |
 
 This is a sanity check, not causal evidence. TracIn also uses the test label,
-which kNN does not, so the comparison is not fully fair to kNN.
+which this kNN does not, so the comparison is not fully fair to kNN.
 
 ### 2. Ground truth: does removing the top examples change the prediction?
 
-For each of 5 test images, the top-100 training examples chosen by each method
-were removed, the model was retrained from scratch (3 seeds), and the increase
-in that image's test loss was measured.
+For each of the first 20 test images, the top-100 training examples chosen by
+each method were removed, the model was retrained from scratch (2 seeds), and the
+increase in that image's test loss was measured. Higher means the removed
+examples mattered more.
 
-| Method | Mean increase in test loss |
+| Method | Mean increase in test loss (± standard error across images) |
 |---|---|
-| Random removal | -0.112 |
-| kNN | +0.175 |
-| TracIn | +1.008 |
+| Random removal | -0.08 ± 0.05 |
+| TracIn, raw | +1.10 ± 0.19 |
+| kNN, label-aware | +1.38 ± 0.17 |
+| **TracIn, cosine** | **+1.64 ± 0.22** |
 
-Per image (mean over seeds, with standard deviation across seeds):
+Paired differences, which cancel the large differences between images:
 
-| Test image | Random | kNN | TracIn |
-|---|---|---|---|
-| 0 | +0.07 (0.18) | +0.05 (0.25) | +0.56 (0.09) |
-| 1 | -0.50 (0.58) | -0.31 (0.75) | +1.64 (1.15) |
-| 2 | -0.07 (0.28) | +0.08 (0.50) | +0.42 (0.66) |
-| 3 | -0.02 (0.71) | +0.73 (0.63) | +1.66 (0.53) |
-| 4 | -0.04 (0.09) | +0.33 (0.21) | +0.75 (0.38) |
+| Comparison (A minus B) | Mean difference | Images where A is higher |
+|---|---|---|
+| Cosine TracIn minus label-aware kNN | +0.26 ± 0.11 | 14 / 20 |
+| Cosine TracIn minus raw TracIn | +0.54 ± 0.15 | 16 / 20 |
+| Raw TracIn minus label-aware kNN | -0.28 ± 0.14 | 7 / 20 |
+| Label-aware kNN minus random | +1.46 ± 0.20 | 20 / 20 |
+| Cosine TracIn minus random | +1.72 ± 0.25 | 20 / 20 |
 
-TracIn has the highest mean on all 5 images. Retraining noise is large (random
-removal alone moves a single image's loss by up to about 0.7), so exact values
-should not be over-interpreted.
+![Ground-truth evaluation](docs/retrain_large_summary.png)
+
+An early version of this test used a kNN baseline that ignored the test label
+(+0.17 on the first 5 images). That comparison was unfair to kNN: restricting kNN
+to the true class raised its effect to about +1.4. Only the label-aware numbers
+are reported above.
 
 ### 3. Forensics: finding corrupted labels (30% label noise)
 
 1,500 of 5,000 training labels were flipped to a random other class. The model
-trained on the noisy labels reaches 0.447 test accuracy. Scores are used to
-flag the 1,500 most suspicious examples.
+trained on the noisy labels reaches 0.447 test accuracy. Scores are used to flag
+the 1,500 most suspicious examples.
 
 | Detector | AUROC | Precision@1500 |
 |---|---|---|
@@ -123,9 +166,9 @@ flag the 1,500 most suspicious examples.
 | Loss + cosine class-conditional | 0.830 | 0.651 |
 | **Training loss** | **0.847** | **0.663** |
 
-The plain validation-influence row used 500 validation images; the three
-variants with "class-conditional" or "all validation images" in their names used
-1,000. Compare the variants with each other rather than with the older row.
+The plain validation-influence row used 500 validation images; the
+class-conditional and all-validation variants used 1,000. Compare the variants
+with each other rather than with the older row.
 
 Repair test: remove the flagged examples, retrain, and measure test accuracy on
 the full 10,000-image test set (3 seeds).
@@ -150,9 +193,8 @@ and relabeled "airplane". The model keeps its clean accuracy (0.507) but sends
 100% of triggered non-airplane test images to "airplane". Attribution was run on
 20 triggered test images that the model sends to "airplane".
 
-Fraction of each image's top-50 training examples that are poisoned
-(base rate 0.04), and detection of all 200 poisoned images from the summed
-scores:
+Fraction of each image's top-50 training examples that are poisoned (base rate
+0.04), and detection of all 200 poisoned images from the summed scores:
 
 | Method | Top-50 poisoned | Detection AUROC |
 |---|---|---|
@@ -163,8 +205,8 @@ scores:
 | kNN (embedding similarity) | 0.971 | 1.000 |
 | **TracIn, cosine-normalized** | **0.992** | **1.000** |
 
-As a control, raw TracIn applied to the same images without the trigger finds
-no poisoned examples (top-50 fraction 0.000).
+As a control, raw TracIn applied to the same images without the trigger finds no
+poisoned examples (top-50 fraction 0.000).
 
 Repair: remove the 200 flagged examples, retrain (2 seeds), and re-measure.
 
@@ -183,46 +225,48 @@ in attack success rate is the real effect.
 
 ## Findings
 
-- TracIn finds training examples that causally affect individual predictions,
-  and does so clearly better than random or nearest-neighbor selection in this
-  setup (section 2).
-- Raw TracIn failed at backdoor detection, and normalizing the gradients
-  (cosine similarity) fixed it completely, with a full repair. A plausible
-  explanation is that training examples with large gradients dominate the raw
-  ranking, but I have not verified this.
-- Normalization also helped for label noise (raw class-conditional AUROC 0.469,
-  cosine 0.744), so the lesson held across both forensics tasks.
-- Cosine TracIn matches, but does not beat, a simple kNN baseline on backdoor
-  detection.
+- Methods that use the test image's label (label-aware kNN and TracIn) remove far
+  more of a prediction's support than random removal. Cosine TracIn had the
+  highest mean effect, and was above raw TracIn on 16 of 20 images.
+- Against a fair, label-aware kNN baseline, cosine TracIn looks slightly better
+  (+0.26 ± 0.11, higher on 14 of 20 images), but this is suggestive rather than
+  conclusive with 20 images and 2 seeds. Raw TracIn was not better than
+  label-aware kNN.
+- Normalizing gradients (cosine similarity) helped TracIn in all three
+  experiments: the ground-truth test, backdoor detection (raw 0.105 vs cosine
+  0.992 of the top-50 poisoned), and label-noise detection (raw class-conditional
+  AUROC 0.469 vs cosine 0.744). A plausible explanation is that training
+  examples with large gradients dominate the raw ranking; I have not verified
+  this.
+- On backdoor detection, cosine TracIn fully repaired the model but only matched
+  a simple kNN baseline.
 - For label noise, plain training loss beat every TracIn-based detector, and it
   was the only practical method that improved accuracy.
 - Better detection did not guarantee better repair. Cosine class-conditional
   cleaning detected corrupted labels well above chance but gave no better
-  accuracy than random removal, probably because about 44% of what it flagged
-  was clean data. I have not tested this.
+  accuracy than random removal, probably because about 44% of what it flagged was
+  clean data. I have not tested this.
 
 ## Limitations
 
 - Small model, small dataset (5,000 images), one dataset.
-- The ground-truth test uses only 5 test images and 3 seeds, and per-image
-  results are noisy.
-- One label-corruption draw and one noise rate; one trigger pattern and one
-  target class for the backdoor, which is an easy case.
+- The ground-truth test uses 20 test images and 2 seeds; retraining noise is
+  large (single-image results vary by a lot between seeds), so differences
+  between the best methods are within a few standard errors.
+- One label-corruption draw and one noise rate; one trigger pattern and one target
+  class for the backdoor, which is an easy case.
 - The backdoor analysis assumes some triggered, misclassified test images are
   already known.
-- The kNN baseline in sections 1 and 2 ignores the label, which makes the
-  comparison with TracIn unfair to it.
-- Standard deviations reported in the repair tables reflect training-seed
-  variation only, not the choice of corrupted examples.
+- The first sanity check (section 1) compares a label-free kNN with a TracIn that
+  uses the label, which is unfair to kNN. Section 2 corrects this.
+- Standard deviations in the repair tables reflect training-seed variation only,
+  not the choice of corrupted examples.
+- The dashboard uses 3 checkpoints for TracIn (the experiments use 4 to 6), so its
+  rankings can differ slightly from the evaluation numbers.
 
-## Roadmap
+## Future work
 
-- [x] CIFAR-10 CNN with checkpoints
-- [x] kNN baseline and TracIn attribution
-- [x] Retraining ground-truth test
-- [x] Label-noise detection and repair
-- [x] Backdoor detection and repair
-- [x] Cosine-normalized validation-influence for label noise
-- [ ] Label-aware kNN and cosine TracIn in the ground-truth test
-- [ ] Removal-size sweep and more test images
-- [ ] Dashboard
+- Larger models and datasets, and a language-model version.
+- A removal-size sweep and more seeds for the ground-truth test.
+- Testing why raw TracIn fails (for example, comparing gradient norms of poisoned
+  and clean examples) and why cleaning with better detection did not help.
