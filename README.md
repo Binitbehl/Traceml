@@ -51,7 +51,7 @@ eval/             retrain.py, analyze.py, retrain_extra.py,
                   label_noise.py, label_noise_val.py,
                   label_noise_cos.py                    label-noise forensics
                   backdoor.py, backdoor_fix.py,
-                  backdoor_repair.py                    backdoor forensics
+                  backdoor_repair.py, grad_norms.py     backdoor forensics
 app/              app.py and pages/1_Backdoor_demo.py   dashboard
 docs/             screenshots and charts used in this README
 ```
@@ -77,6 +77,7 @@ python -m eval.label_noise_cos
 python -m eval.backdoor
 python -m eval.backdoor_fix
 python -m eval.backdoor_repair
+python -m eval.grad_norms
 streamlit run app/app.py
 ```
 
@@ -223,6 +224,25 @@ Cosine TracIn flagged exactly the poisoned set, so its result equals the oracle.
 Clean-accuracy differences of 1-2 points are within noise with 2 seeds; the drop
 in attack success rate is the real effect.
 
+#### Why raw TracIn fails here: gradient norms
+
+Gradient norm of poisoned vs clean training examples (`eval/grad_norms.py`):
+
+| Checkpoint | Median norm, poisoned | Median norm, clean | AUROC (low norm = poisoned) |
+|---|---|---|---|
+| 3 | 1.715 | 13.452 | 0.966 |
+| 6 | 0.162 | 15.228 | 0.983 |
+| 9 | 0.409 | 18.585 | 0.919 |
+| 11 | 0.031 | 17.440 | 0.991 |
+
+Poisoned examples are fit almost perfectly, so their gradients are tiny, and a raw
+dot product ranks them low even when their direction matches the test image.
+
+Average Spearman correlation of a score with the training example's mean gradient
+norm, over the 20 triggered test images: raw TracIn +0.132, cosine TracIn -0.019.
+Top-50 examples per image: raw has 1.9x the median gradient norm (0.105
+poisoned), cosine has 0.1x the median norm (0.992 poisoned).
+
 ## Findings
 
 - Methods that use the test image's label (label-aware kNN and TracIn) remove far
@@ -235,9 +255,14 @@ in attack success rate is the real effect.
 - Normalizing gradients (cosine similarity) helped TracIn in all three
   experiments: the ground-truth test, backdoor detection (raw 0.105 vs cosine
   0.992 of the top-50 poisoned), and label-noise detection (raw class-conditional
-  AUROC 0.469 vs cosine 0.744). A plausible explanation is that training
-  examples with large gradients dominate the raw ranking; I have not verified
-  this.
+  AUROC 0.469 vs cosine 0.744).
+- A gradient-norm analysis of the backdoor setup is consistent with an
+  explanation for the raw failure: poisoned training examples have far smaller
+  gradients than clean ones (median norm 0.031 vs 17.4 at the final checkpoint,
+  1.7 vs 13.5 at the first), so a raw dot product buries them. The overall
+  correlation between the raw score and gradient norm was only +0.13, so
+  gradient size is not the whole story, and this is correlational evidence from
+  one backdoor setup.
 - On backdoor detection, cosine TracIn fully repaired the model but only matched
   a simple kNN baseline.
 - For label noise, plain training loss beat every TracIn-based detector, and it
@@ -257,6 +282,10 @@ in attack success rate is the real effect.
   class for the backdoor, which is an easy case.
 - The backdoor analysis assumes some triggered, misclassified test images are
   already known.
+- The gradient-norm analysis is correlational and covers only the backdoor
+  setting. Cosine's top-50 had gradient norms 0.1x the median, so normalization
+  favors small-gradient examples, which suits a backdoor but may not suit other
+  tasks.
 - The first sanity check (section 1) compares a label-free kNN with a TracIn that
   uses the label, which is unfair to kNN. Section 2 corrects this.
 - Standard deviations in the repair tables reflect training-seed variation only,
@@ -268,5 +297,6 @@ in attack success rate is the real effect.
 
 - Larger models and datasets, and a language-model version.
 - A removal-size sweep and more seeds for the ground-truth test.
-- Testing why raw TracIn fails (for example, comparing gradient norms of poisoned
-  and clean examples) and why cleaning with better detection did not help.
+- Measuring gradient norms of corrupted vs clean examples in the label-noise
+  setting, and testing why cleaning with better detection did not help there (for
+  example, the class balance of the flagged examples).
